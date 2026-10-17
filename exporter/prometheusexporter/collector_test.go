@@ -237,9 +237,10 @@ func TestConvertDoubleHistogramExemplar(t *testing.T) {
 		resourceAttributes: pMap,
 	}
 
-	pbMetric, _ := c.convertDoubleHistogram(metric, pMap, "test", "1.0.0", "http://test.com", pcommon.NewMap())
+	pbMetrics, _ := c.convertDoubleHistogram(metric, pMap, "test", "1.0.0", "http://test.com", pcommon.NewMap())
+	require.Len(t, pbMetrics, 1)
 	m := io_prometheus_client.Metric{}
-	err := pbMetric.Write(&m)
+	err := pbMetrics[0].Write(&m)
 	if err != nil {
 		return
 	}
@@ -298,9 +299,10 @@ func TestConvertMonotonicSumExemplar(t *testing.T) {
 		resourceAttributes: pMap,
 	}
 
-	promMetric, _ := c.convertSum(metric, pMap, "test", "1.0.0", "http://test.com", pcommon.NewMap())
+	promMetrics, _ := c.convertSum(metric, pMap, "test", "1.0.0", "http://test.com", pcommon.NewMap())
+	require.Len(t, promMetrics, 1)
 	outMetric := io_prometheus_client.Metric{}
-	err := promMetric.Write(&outMetric)
+	err := promMetrics[0].Write(&outMetric)
 	if err != nil {
 		t.Error("Unable to write metric to prometheus output form:", err)
 	}
@@ -340,11 +342,12 @@ func TestConvertExponentialHistogramExemplar(t *testing.T) {
 		resourceAttributes: pMap,
 	}
 
-	pbMetric, err := c.convertExponentialHistogram(metric, pMap, "test", "1.0.0", "http://test.com", pcommon.NewMap())
+	pbMetrics, err := c.convertExponentialHistogram(metric, pMap, "test", "1.0.0", "http://test.com", pcommon.NewMap())
 	require.NoError(t, err)
+	require.Len(t, pbMetrics, 1)
 
 	m := io_prometheus_client.Metric{}
-	require.NoError(t, pbMetric.Write(&m))
+	require.NoError(t, pbMetrics[0].Write(&m))
 
 	h := m.GetHistogram()
 	require.NotNil(t, h)
@@ -506,11 +509,12 @@ func TestScopeAttributeConflictsDropped(t *testing.T) {
 	scopeAttributes.PutStr("custom", "should-be-kept")
 
 	c := newCollector(&Config{}, zap.NewNop())
-	m, err := c.convertMetric(metric, pcommon.NewMap(), "test.scope", "1.0.0", "https://opentelemetry.io/schemas/1.7.0", scopeAttributes)
+	metrics, err := c.convertMetric(metric, pcommon.NewMap(), "test.scope", "1.0.0", "https://opentelemetry.io/schemas/1.7.0", scopeAttributes)
 	require.NoError(t, err)
+	require.Len(t, metrics, 1)
 
 	pbMetric := io_prometheus_client.Metric{}
-	require.NoError(t, m.Write(&pbMetric))
+	require.NoError(t, metrics[0].Write(&pbMetric))
 
 	labels := make(map[string]string, len(pbMetric.Label))
 	for _, l := range pbMetric.Label {
@@ -1188,4 +1192,268 @@ func TestNormalizeNamespaceSanitizes(t *testing.T) {
 	ns2 := normalizeNamespace("my_namespace.1", labelNamerUTF8, logger)
 
 	require.Equal(t, "my_namespace.1", ns2, "UTF-8 allowed should not sanitize ASCII characters")
+}
+
+func TestConvertMultipleDataPoints_Gauge(t *testing.T) {
+	c := newCollector(&Config{}, zap.NewNop())
+	metric := pmetric.NewMetric()
+	metric.SetName("test_gauge")
+	metric.SetDescription("gauge with multiple data points")
+	gauge := metric.SetEmptyGauge()
+
+	dp1 := gauge.DataPoints().AppendEmpty()
+	dp1.SetIntValue(10)
+	dp1.Attributes().PutStr("foo", "bar")
+
+	dp2 := gauge.DataPoints().AppendEmpty()
+	dp2.SetIntValue(20)
+	dp2.Attributes().PutStr("foo", "baz")
+
+	metrics, err := c.convertMetric(metric, pcommon.NewMap(), "test_scope", "1.0.0", "", pcommon.NewMap())
+	require.NoError(t, err)
+	require.Len(t, metrics, 2)
+
+	m1 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[0].Write(&m1))
+	require.Equal(t, 10.0, m1.GetGauge().GetValue())
+
+	m2 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[1].Write(&m2))
+	require.Equal(t, 20.0, m2.GetGauge().GetValue())
+}
+
+func TestConvertMultipleDataPoints_Sum(t *testing.T) {
+	c := newCollector(&Config{}, zap.NewNop())
+	metric := pmetric.NewMetric()
+	metric.SetName("test_sum")
+	sum := metric.SetEmptySum()
+	sum.SetIsMonotonic(true)
+
+	dp1 := sum.DataPoints().AppendEmpty()
+	dp1.SetIntValue(100)
+	dp1.Attributes().PutStr("code", "200")
+
+	dp2 := sum.DataPoints().AppendEmpty()
+	dp2.SetIntValue(5)
+	dp2.Attributes().PutStr("code", "500")
+
+	metrics, err := c.convertMetric(metric, pcommon.NewMap(), "test_scope", "1.0.0", "", pcommon.NewMap())
+	require.NoError(t, err)
+	require.Len(t, metrics, 2)
+
+	m1 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[0].Write(&m1))
+	require.Equal(t, 100.0, m1.GetCounter().GetValue())
+
+	m2 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[1].Write(&m2))
+	require.Equal(t, 5.0, m2.GetCounter().GetValue())
+}
+
+func TestConvertMultipleDataPoints_Histogram(t *testing.T) {
+	c := newCollector(&Config{}, zap.NewNop())
+	metric := pmetric.NewMetric()
+	metric.SetName("test_histogram")
+	hist := metric.SetEmptyHistogram()
+
+	dp1 := hist.DataPoints().AppendEmpty()
+	dp1.SetCount(2)
+	dp1.SetSum(15)
+	dp1.ExplicitBounds().FromRaw([]float64{10, 20})
+	dp1.BucketCounts().FromRaw([]uint64{1, 1})
+	dp1.Attributes().PutStr("method", "GET")
+
+	dp2 := hist.DataPoints().AppendEmpty()
+	dp2.SetCount(4)
+	dp2.SetSum(30)
+	dp2.ExplicitBounds().FromRaw([]float64{10, 20})
+	dp2.BucketCounts().FromRaw([]uint64{2, 2})
+	dp2.Attributes().PutStr("method", "POST")
+
+	metrics, err := c.convertMetric(metric, pcommon.NewMap(), "test_scope", "1.0.0", "", pcommon.NewMap())
+	require.NoError(t, err)
+	require.Len(t, metrics, 2)
+
+	m1 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[0].Write(&m1))
+	require.Equal(t, uint64(2), m1.GetHistogram().GetSampleCount())
+	require.Equal(t, 15.0, m1.GetHistogram().GetSampleSum())
+
+	m2 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[1].Write(&m2))
+	require.Equal(t, uint64(4), m2.GetHistogram().GetSampleCount())
+	require.Equal(t, 30.0, m2.GetHistogram().GetSampleSum())
+}
+
+func TestConvertMultipleDataPoints_Summary(t *testing.T) {
+	c := newCollector(&Config{}, zap.NewNop())
+	metric := pmetric.NewMetric()
+	metric.SetName("test_summary")
+	summary := metric.SetEmptySummary()
+
+	dp1 := summary.DataPoints().AppendEmpty()
+	dp1.SetCount(10)
+	dp1.SetSum(100)
+	dp1.Attributes().PutStr("env", "prod")
+	q1 := dp1.QuantileValues().AppendEmpty()
+	q1.SetQuantile(0.5)
+	q1.SetValue(10)
+
+	dp2 := summary.DataPoints().AppendEmpty()
+	dp2.SetCount(20)
+	dp2.SetSum(200)
+	dp2.Attributes().PutStr("env", "staging")
+	q2 := dp2.QuantileValues().AppendEmpty()
+	q2.SetQuantile(0.5)
+	q2.SetValue(20)
+
+	metrics, err := c.convertMetric(metric, pcommon.NewMap(), "test_scope", "1.0.0", "", pcommon.NewMap())
+	require.NoError(t, err)
+	require.Len(t, metrics, 2)
+
+	m1 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[0].Write(&m1))
+	require.Equal(t, uint64(10), m1.GetSummary().GetSampleCount())
+	require.Equal(t, 100.0, m1.GetSummary().GetSampleSum())
+
+	m2 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[1].Write(&m2))
+	require.Equal(t, uint64(20), m2.GetSummary().GetSampleCount())
+	require.Equal(t, 200.0, m2.GetSummary().GetSampleSum())
+}
+
+func TestConvertMultipleDataPoints_ExponentialHistogram(t *testing.T) {
+	c := newCollector(&Config{}, zap.NewNop())
+	metric := pmetric.NewMetric()
+	metric.SetName("test_exponential_histogram")
+	expHist := metric.SetEmptyExponentialHistogram()
+	expHist.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+	dp1 := expHist.DataPoints().AppendEmpty()
+	dp1.SetCount(5)
+	dp1.SetSum(20)
+	dp1.SetScale(0)
+	dp1.SetZeroThreshold(1)
+	dp1.SetZeroCount(1)
+	dp1.Positive().SetOffset(-1)
+	dp1.Positive().BucketCounts().FromRaw([]uint64{2, 2})
+	dp1.Attributes().PutStr("region", "us-east")
+
+	dp2 := expHist.DataPoints().AppendEmpty()
+	dp2.SetCount(10)
+	dp2.SetSum(40)
+	dp2.SetScale(0)
+	dp2.SetZeroThreshold(1)
+	dp2.SetZeroCount(2)
+	dp2.Positive().SetOffset(-1)
+	dp2.Positive().BucketCounts().FromRaw([]uint64{4, 4})
+	dp2.Attributes().PutStr("region", "us-west")
+
+	metrics, err := c.convertMetric(metric, pcommon.NewMap(), "test_scope", "1.0.0", "", pcommon.NewMap())
+	require.NoError(t, err)
+	require.Len(t, metrics, 2)
+
+	m1 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[0].Write(&m1))
+	require.Equal(t, uint64(5), m1.GetHistogram().GetSampleCount())
+	require.Equal(t, 20.0, m1.GetHistogram().GetSampleSum())
+
+	m2 := io_prometheus_client.Metric{}
+	require.NoError(t, metrics[1].Write(&m2))
+	require.Equal(t, uint64(10), m2.GetHistogram().GetSampleCount())
+	require.Equal(t, 40.0, m2.GetHistogram().GetSampleSum())
+}
+
+func TestConvertEmptyDataPoints(t *testing.T) {
+	c := newCollector(&Config{}, zap.NewNop())
+
+	testCases := []struct {
+		name      string
+		setMetric func(pmetric.Metric)
+	}{
+		{
+			name: "Gauge with no data points",
+			setMetric: func(m pmetric.Metric) {
+				m.SetName("empty_gauge")
+				m.SetEmptyGauge()
+			},
+		},
+		{
+			name: "Sum with no data points",
+			setMetric: func(m pmetric.Metric) {
+				m.SetName("empty_sum")
+				m.SetEmptySum()
+			},
+		},
+		{
+			name: "Histogram with no data points",
+			setMetric: func(m pmetric.Metric) {
+				m.SetName("empty_histogram")
+				m.SetEmptyHistogram()
+			},
+		},
+		{
+			name: "Summary with no data points",
+			setMetric: func(m pmetric.Metric) {
+				m.SetName("empty_summary")
+				m.SetEmptySummary()
+			},
+		},
+		{
+			name: "ExponentialHistogram with no data points",
+			setMetric: func(m pmetric.Metric) {
+				m.SetName("empty_exp_histogram")
+				m.SetEmptyExponentialHistogram()
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			metric := pmetric.NewMetric()
+			tc.setMetric(metric)
+
+			metrics, err := c.convertMetric(metric, pcommon.NewMap(), "test_scope", "1.0.0", "", pcommon.NewMap())
+			require.NoError(t, err)
+			require.Empty(t, metrics)
+		})
+	}
+}
+
+func TestCollect_MultipleDataPoints(t *testing.T) {
+	metric := pmetric.NewMetric()
+	metric.SetName("test_collect_gauge")
+	gauge := metric.SetEmptyGauge()
+
+	dp1 := gauge.DataPoints().AppendEmpty()
+	dp1.SetIntValue(1)
+	dp1.Attributes().PutStr("key", "val1")
+
+	dp2 := gauge.DataPoints().AppendEmpty()
+	dp2.SetIntValue(2)
+	dp2.Attributes().PutStr("key", "val2")
+
+	dp3 := gauge.DataPoints().AppendEmpty()
+	dp3.SetIntValue(3)
+	dp3.Attributes().PutStr("key", "val3")
+
+	c := newCollector(&Config{}, zap.NewNop())
+	c.accumulator = &mockAccumulator{
+		metrics:            []pmetric.Metric{metric},
+		resourceAttributes: pcommon.NewMap(),
+		scopeNames:         []string{"test"},
+		scopeVersions:      []string{"1.0.0"},
+		scopeSchemaURLs:    []string{""},
+		scopeAttributes:    []pcommon.Map{pcommon.NewMap()},
+	}
+
+	ch := make(chan prometheus.Metric, 10)
+	c.Collect(ch)
+	close(ch)
+
+	collected := 0
+	for range ch {
+		collected++
+	}
+	require.Equal(t, 3, collected)
 }

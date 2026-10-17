@@ -1,0 +1,6 @@
+change_type: bug_fix
+component: exporter/prometheus
+note: Handle multiple data points in metric conversion without silently dropping points
+issues: [0]
+subtext:
+change_logs: [user]

@@ -179,7 +179,7 @@ func (c *collector) processMetrics(rm pmetric.ResourceMetrics) (n int) {
 
 var errUnknownMetricType = errors.New("unknown metric type")
 
-func (c *collector) convertMetric(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) (prometheus.Metric, error) {
+func (c *collector) convertMetric(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) ([]prometheus.Metric, error) {
 	switch metric.Type() {
 	case pmetric.MetricTypeGauge:
 		return c.convertGauge(metric, resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
@@ -219,79 +219,92 @@ func bucketsToNativeMap(buckets pmetric.ExponentialHistogramDataPointBuckets, sc
 	return out
 }
 
-func (c *collector) convertExponentialHistogram(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) (prometheus.Metric, error) {
-	dp := metric.ExponentialHistogram().DataPoints().At(0)
+func (c *collector) convertExponentialHistogram(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) ([]prometheus.Metric, error) {
+	dps := metric.ExponentialHistogram().DataPoints()
+	metrics := make([]prometheus.Metric, 0, dps.Len())
+	var multiErrs error
 
-	// Build metadata/labels first.
-	desc, attributes, err := c.getMetricMetadata(metric, dto.MetricType_HISTOGRAM.Enum(), dp.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
-	if err != nil {
-		return nil, err
-	}
+	for i := 0; i < dps.Len(); i++ {
+		dp := dps.At(i)
 
-	schema := dp.Scale()
-
-	// Schema -53 (CBNH) is already supported via the classic histogram path.
-	// The Prometheus receiver converts NHCB to OTLP classic Histogram (not ExponentialHistogram),
-	// which is then handled by convertDoubleHistogram.
-	if schema == cbnhScale {
-		return nil, errors.New("unexpected ExponentialHistogram with schema -53; CBNH is supported via classic histogram")
-	}
-	if schema < -4 {
-		return nil, fmt.Errorf("cannot convert exponential to native histogram: scale must be >= -4, was %d", schema)
-	}
-	var scaleDown int32
-	if schema > 8 {
-		scaleDown = schema - 8
-		schema = 8
-	}
-
-	pos := bucketsToNativeMap(dp.Positive(), scaleDown)
-	neg := bucketsToNativeMap(dp.Negative(), scaleDown)
-
-	zeroThresh := dp.ZeroThreshold()
-	if zeroThresh == 0 {
-		zeroThresh = defaultZeroThreshold
-	}
-
-	// Use created timestamp if start time is set (> 0), else zero value.
-	created := time.Time{}
-	if dp.StartTimestamp().AsTime().Unix() > 0 {
-		created = dp.StartTimestamp().AsTime()
-	}
-
-	sumVal := 0.0
-	if dp.HasSum() {
-		sumVal = dp.Sum()
-	}
-
-	m, err := prometheus.NewConstNativeHistogram(
-		desc,
-		dp.Count(),
-		sumVal,
-		pos,
-		neg,
-		dp.ZeroCount(),
-		schema,
-		zeroThresh,
-		created,
-		attributes...,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	exemplars := convertExemplars(dp.Exemplars())
-	if len(exemplars) > 0 {
-		m, err = prometheus.NewMetricWithExemplars(m, exemplars...)
+		// Build metadata/labels first.
+		desc, attributes, err := c.getMetricMetadata(metric, dto.MetricType_HISTOGRAM.Enum(), dp.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
 		if err != nil {
-			return nil, err
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
 		}
+
+		schema := dp.Scale()
+
+		// Schema -53 (CBNH) is already supported via the classic histogram path.
+		// The Prometheus receiver converts NHCB to OTLP classic Histogram (not ExponentialHistogram),
+		// which is then handled by convertDoubleHistogram.
+		if schema == cbnhScale {
+			multiErrs = multierr.Append(multiErrs, errors.New("unexpected ExponentialHistogram with schema -53; CBNH is supported via classic histogram"))
+			continue
+		}
+		if schema < -4 {
+			multiErrs = multierr.Append(multiErrs, fmt.Errorf("cannot convert exponential to native histogram: scale must be >= -4, was %d", schema))
+			continue
+		}
+		var scaleDown int32
+		if schema > 8 {
+			scaleDown = schema - 8
+			schema = 8
+		}
+
+		pos := bucketsToNativeMap(dp.Positive(), scaleDown)
+		neg := bucketsToNativeMap(dp.Negative(), scaleDown)
+
+		zeroThresh := dp.ZeroThreshold()
+		if zeroThresh == 0 {
+			zeroThresh = defaultZeroThreshold
+		}
+
+		// Use created timestamp if start time is set (> 0), else zero value.
+		created := time.Time{}
+		if dp.StartTimestamp().AsTime().Unix() > 0 {
+			created = dp.StartTimestamp().AsTime()
+		}
+
+		sumVal := 0.0
+		if dp.HasSum() {
+			sumVal = dp.Sum()
+		}
+
+		m, err := prometheus.NewConstNativeHistogram(
+			desc,
+			dp.Count(),
+			sumVal,
+			pos,
+			neg,
+			dp.ZeroCount(),
+			schema,
+			zeroThresh,
+			created,
+			attributes...,
+		)
+		if err != nil {
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
+		}
+
+		exemplars := convertExemplars(dp.Exemplars())
+		if len(exemplars) > 0 {
+			m, err = prometheus.NewMetricWithExemplars(m, exemplars...)
+			if err != nil {
+				multiErrs = multierr.Append(multiErrs, err)
+				continue
+			}
+		}
+
+		if c.sendTimestamps {
+			m = prometheus.NewMetricWithTimestamp(dp.Timestamp().AsTime(), m)
+		}
+		metrics = append(metrics, m)
 	}
 
-	if c.sendTimestamps {
-		return prometheus.NewMetricWithTimestamp(dp.Timestamp().AsTime(), m), nil
-	}
-	return m, nil
+	return metrics, multiErrs
 }
 
 func (c *collector) getMetricMetadata(metric pmetric.Metric, mType *dto.MetricType, attributes, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) (*prometheus.Desc, []string, error) {
@@ -363,39 +376,51 @@ func isReservedScopeAttribute(k string) bool {
 	}
 }
 
-func (c *collector) convertGauge(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) (prometheus.Metric, error) {
-	ip := metric.Gauge().DataPoints().At(0)
+func (c *collector) convertGauge(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) ([]prometheus.Metric, error) {
+	dps := metric.Gauge().DataPoints()
+	metrics := make([]prometheus.Metric, 0, dps.Len())
+	var multiErrs error
 
-	desc, attributes, err := c.getMetricMetadata(metric, dto.MetricType_GAUGE.Enum(), ip.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
-	if err != nil {
-		return nil, err
+	for i := 0; i < dps.Len(); i++ {
+		ip := dps.At(i)
+
+		desc, attributes, err := c.getMetricMetadata(metric, dto.MetricType_GAUGE.Enum(), ip.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
+		if err != nil {
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
+		}
+
+		var value float64
+		switch ip.ValueType() {
+		case pmetric.NumberDataPointValueTypeInt:
+			value = float64(ip.IntValue())
+		case pmetric.NumberDataPointValueTypeDouble:
+			value = ip.DoubleValue()
+		}
+		metricType := prometheus.GaugeValue
+		originalType, ok := metric.Metadata().Get(prometheustranslator.MetricMetadataTypeKey)
+		if ok && originalType.Str() == string(model.MetricTypeUnknown) {
+			metricType = prometheus.UntypedValue
+		}
+		m, err := prometheus.NewConstMetric(desc, metricType, value, attributes...)
+		if err != nil {
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
+		}
+
+		if c.sendTimestamps {
+			m = prometheus.NewMetricWithTimestamp(ip.Timestamp().AsTime(), m)
+		}
+		metrics = append(metrics, m)
 	}
 
-	var value float64
-	switch ip.ValueType() {
-	case pmetric.NumberDataPointValueTypeInt:
-		value = float64(ip.IntValue())
-	case pmetric.NumberDataPointValueTypeDouble:
-		value = ip.DoubleValue()
-	}
-	metricType := prometheus.GaugeValue
-	originalType, ok := metric.Metadata().Get(prometheustranslator.MetricMetadataTypeKey)
-	if ok && originalType.Str() == string(model.MetricTypeUnknown) {
-		metricType = prometheus.UntypedValue
-	}
-	m, err := prometheus.NewConstMetric(desc, metricType, value, attributes...)
-	if err != nil {
-		return nil, err
-	}
-
-	if c.sendTimestamps {
-		return prometheus.NewMetricWithTimestamp(ip.Timestamp().AsTime(), m), nil
-	}
-	return m, nil
+	return metrics, multiErrs
 }
 
-func (c *collector) convertSum(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) (prometheus.Metric, error) {
-	ip := metric.Sum().DataPoints().At(0)
+func (c *collector) convertSum(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) ([]prometheus.Metric, error) {
+	dps := metric.Sum().DataPoints()
+	metrics := make([]prometheus.Metric, 0, dps.Len())
+	var multiErrs error
 
 	metricType := prometheus.GaugeValue
 	mType := dto.MetricType_GAUGE.Enum()
@@ -404,133 +429,161 @@ func (c *collector) convertSum(metric pmetric.Metric, resourceAttrs pcommon.Map,
 		mType = dto.MetricType_COUNTER.Enum()
 	}
 
-	desc, attributes, err := c.getMetricMetadata(metric, mType, ip.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
-	if err != nil {
-		return nil, err
-	}
-	var value float64
-	switch ip.ValueType() {
-	case pmetric.NumberDataPointValueTypeInt:
-		value = float64(ip.IntValue())
-	case pmetric.NumberDataPointValueTypeDouble:
-		value = ip.DoubleValue()
-	}
+	for i := 0; i < dps.Len(); i++ {
+		ip := dps.At(i)
 
-	var exemplars []prometheus.Exemplar
-	// Prometheus currently only supports exporting counters
-	if metricType == prometheus.CounterValue {
-		exemplars = convertExemplars(ip.Exemplars())
-	}
-
-	var m prometheus.Metric
-	if metricType == prometheus.CounterValue && ip.StartTimestamp().AsTime().Unix() > 0 {
-		m, err = prometheus.NewConstMetricWithCreatedTimestamp(desc, metricType, value, ip.StartTimestamp().AsTime(), attributes...)
-	} else {
-		m, err = prometheus.NewConstMetric(desc, metricType, value, attributes...)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if len(exemplars) > 0 {
-		m, err = prometheus.NewMetricWithExemplars(m, exemplars...)
+		desc, attributes, err := c.getMetricMetadata(metric, mType, ip.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
 		if err != nil {
-			return nil, err
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
 		}
+		var value float64
+		switch ip.ValueType() {
+		case pmetric.NumberDataPointValueTypeInt:
+			value = float64(ip.IntValue())
+		case pmetric.NumberDataPointValueTypeDouble:
+			value = ip.DoubleValue()
+		}
+
+		var exemplars []prometheus.Exemplar
+		// Prometheus currently only supports exporting counters
+		if metricType == prometheus.CounterValue {
+			exemplars = convertExemplars(ip.Exemplars())
+		}
+
+		var m prometheus.Metric
+		if metricType == prometheus.CounterValue && ip.StartTimestamp().AsTime().Unix() > 0 {
+			m, err = prometheus.NewConstMetricWithCreatedTimestamp(desc, metricType, value, ip.StartTimestamp().AsTime(), attributes...)
+		} else {
+			m, err = prometheus.NewConstMetric(desc, metricType, value, attributes...)
+		}
+		if err != nil {
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
+		}
+
+		if len(exemplars) > 0 {
+			m, err = prometheus.NewMetricWithExemplars(m, exemplars...)
+			if err != nil {
+				multiErrs = multierr.Append(multiErrs, err)
+				continue
+			}
+		}
+
+		if c.sendTimestamps {
+			m = prometheus.NewMetricWithTimestamp(ip.Timestamp().AsTime(), m)
+		}
+		metrics = append(metrics, m)
 	}
 
-	if c.sendTimestamps {
-		return prometheus.NewMetricWithTimestamp(ip.Timestamp().AsTime(), m), nil
-	}
-	return m, nil
+	return metrics, multiErrs
 }
 
-func (c *collector) convertSummary(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) (prometheus.Metric, error) {
-	// TODO: In the off chance that we have multiple points
-	// within the same metric, how should we handle them?
-	point := metric.Summary().DataPoints().At(0)
+func (c *collector) convertSummary(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) ([]prometheus.Metric, error) {
+	dps := metric.Summary().DataPoints()
+	metrics := make([]prometheus.Metric, 0, dps.Len())
+	var multiErrs error
 
-	quantiles := make(map[float64]float64)
-	qv := point.QuantileValues()
-	for j := 0; j < qv.Len(); j++ {
-		qvj := qv.At(j)
-		// There should be EXACTLY one quantile value lest it is an invalid exposition.
-		quantiles[qvj.Quantile()] = qvj.Value()
+	for i := 0; i < dps.Len(); i++ {
+		point := dps.At(i)
+
+		quantiles := make(map[float64]float64)
+		qv := point.QuantileValues()
+		for j := 0; j < qv.Len(); j++ {
+			qvj := qv.At(j)
+			// There should be EXACTLY one quantile value lest it is an invalid exposition.
+			quantiles[qvj.Quantile()] = qvj.Value()
+		}
+
+		desc, attributes, err := c.getMetricMetadata(metric, dto.MetricType_SUMMARY.Enum(), point.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
+		if err != nil {
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
+		}
+		var m prometheus.Metric
+		if point.StartTimestamp().AsTime().Unix() > 0 {
+			m, err = prometheus.NewConstSummaryWithCreatedTimestamp(desc, point.Count(), point.Sum(), quantiles, point.StartTimestamp().AsTime(), attributes...)
+		} else {
+			m, err = prometheus.NewConstSummary(desc, point.Count(), point.Sum(), quantiles, attributes...)
+		}
+		if err != nil {
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
+		}
+		if c.sendTimestamps {
+			m = prometheus.NewMetricWithTimestamp(point.Timestamp().AsTime(), m)
+		}
+		metrics = append(metrics, m)
 	}
 
-	desc, attributes, err := c.getMetricMetadata(metric, dto.MetricType_SUMMARY.Enum(), point.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
-	if err != nil {
-		return nil, err
-	}
-	var m prometheus.Metric
-	if point.StartTimestamp().AsTime().Unix() > 0 {
-		m, err = prometheus.NewConstSummaryWithCreatedTimestamp(desc, point.Count(), point.Sum(), quantiles, point.StartTimestamp().AsTime(), attributes...)
-	} else {
-		m, err = prometheus.NewConstSummary(desc, point.Count(), point.Sum(), quantiles, attributes...)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if c.sendTimestamps {
-		return prometheus.NewMetricWithTimestamp(point.Timestamp().AsTime(), m), nil
-	}
-	return m, nil
+	return metrics, multiErrs
 }
 
-func (c *collector) convertDoubleHistogram(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) (prometheus.Metric, error) {
-	ip := metric.Histogram().DataPoints().At(0)
-	desc, attributes, err := c.getMetricMetadata(metric, dto.MetricType_HISTOGRAM.Enum(), ip.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
-	if err != nil {
-		return nil, err
-	}
+func (c *collector) convertDoubleHistogram(metric pmetric.Metric, resourceAttrs pcommon.Map, scopeName, scopeVersion, scopeSchemaURL string, scopeAttributes pcommon.Map) ([]prometheus.Metric, error) {
+	dps := metric.Histogram().DataPoints()
+	metrics := make([]prometheus.Metric, 0, dps.Len())
+	var multiErrs error
 
-	indicesMap := make(map[float64]int)
-	buckets := make([]float64, 0, ip.BucketCounts().Len())
-	for index := 0; index < ip.ExplicitBounds().Len(); index++ {
-		bucket := ip.ExplicitBounds().At(index)
-		if _, added := indicesMap[bucket]; !added {
-			indicesMap[bucket] = index
-			buckets = append(buckets, bucket)
-		}
-	}
-	sort.Float64s(buckets)
-
-	cumCount := uint64(0)
-
-	points := make(map[float64]uint64)
-	for _, bucket := range buckets {
-		index := indicesMap[bucket]
-		var countPerBucket uint64
-		if ip.ExplicitBounds().Len() > 0 && index < ip.ExplicitBounds().Len() && index < ip.BucketCounts().Len() {
-			countPerBucket = ip.BucketCounts().At(index)
-		}
-		cumCount += countPerBucket
-		points[bucket] = cumCount
-	}
-
-	exemplars := convertExemplars(ip.Exemplars())
-
-	var m prometheus.Metric
-	if ip.StartTimestamp().AsTime().Unix() > 0 {
-		m, err = prometheus.NewConstHistogramWithCreatedTimestamp(desc, ip.Count(), ip.Sum(), points, ip.StartTimestamp().AsTime(), attributes...)
-	} else {
-		m, err = prometheus.NewConstHistogram(desc, ip.Count(), ip.Sum(), points, attributes...)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if len(exemplars) > 0 {
-		m, err = prometheus.NewMetricWithExemplars(m, exemplars...)
+	for i := 0; i < dps.Len(); i++ {
+		ip := dps.At(i)
+		desc, attributes, err := c.getMetricMetadata(metric, dto.MetricType_HISTOGRAM.Enum(), ip.Attributes(), resourceAttrs, scopeName, scopeVersion, scopeSchemaURL, scopeAttributes)
 		if err != nil {
-			return nil, err
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
 		}
+
+		indicesMap := make(map[float64]int)
+		buckets := make([]float64, 0, ip.BucketCounts().Len())
+		for index := 0; index < ip.ExplicitBounds().Len(); index++ {
+			bucket := ip.ExplicitBounds().At(index)
+			if _, added := indicesMap[bucket]; !added {
+				indicesMap[bucket] = index
+				buckets = append(buckets, bucket)
+			}
+		}
+		sort.Float64s(buckets)
+
+		cumCount := uint64(0)
+
+		points := make(map[float64]uint64)
+		for _, bucket := range buckets {
+			index := indicesMap[bucket]
+			var countPerBucket uint64
+			if ip.ExplicitBounds().Len() > 0 && index < ip.ExplicitBounds().Len() && index < ip.BucketCounts().Len() {
+				countPerBucket = ip.BucketCounts().At(index)
+			}
+			cumCount += countPerBucket
+			points[bucket] = cumCount
+		}
+
+		exemplars := convertExemplars(ip.Exemplars())
+
+		var m prometheus.Metric
+		if ip.StartTimestamp().AsTime().Unix() > 0 {
+			m, err = prometheus.NewConstHistogramWithCreatedTimestamp(desc, ip.Count(), ip.Sum(), points, ip.StartTimestamp().AsTime(), attributes...)
+		} else {
+			m, err = prometheus.NewConstHistogram(desc, ip.Count(), ip.Sum(), points, attributes...)
+		}
+		if err != nil {
+			multiErrs = multierr.Append(multiErrs, err)
+			continue
+		}
+
+		if len(exemplars) > 0 {
+			m, err = prometheus.NewMetricWithExemplars(m, exemplars...)
+			if err != nil {
+				multiErrs = multierr.Append(multiErrs, err)
+				continue
+			}
+		}
+
+		if c.sendTimestamps {
+			m = prometheus.NewMetricWithTimestamp(ip.Timestamp().AsTime(), m)
+		}
+		metrics = append(metrics, m)
 	}
 
-	if c.sendTimestamps {
-		return prometheus.NewMetricWithTimestamp(ip.Timestamp().AsTime(), m), nil
-	}
-	return m, nil
+	return metrics, multiErrs
 }
 
 func (c *collector) createTargetInfoMetrics(resourceAttrs []pcommon.Map) ([]prometheus.Metric, error) {
@@ -644,14 +697,15 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		pMetric := inMetrics[i]
 		rAttr := resourceAttrs[i]
 
-		m, err := c.convertMetric(pMetric, rAttr, scopeNames[i], scopeVersions[i], scopeSchemaURLs[i], scopeAttributes[i])
+		metrics, err := c.convertMetric(pMetric, rAttr, scopeNames[i], scopeVersions[i], scopeSchemaURLs[i], scopeAttributes[i])
 		if err != nil {
 			c.logger.Error(fmt.Sprintf("failed to convert metric %s: %s", pMetric.Name(), err.Error()))
-			continue
 		}
 
-		ch <- m
-		c.logger.Debug(fmt.Sprintf("metric served: %s", m.Desc().String()))
+		for _, m := range metrics {
+			ch <- m
+			c.logger.Debug(fmt.Sprintf("metric served: %s", m.Desc().String()))
+		}
 	}
 	c.cleanupMetricFamilies()
 }

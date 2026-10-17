@@ -97,10 +97,11 @@ func TestCollectorMetricLabelSanitization(t *testing.T) {
 		defer testutil.SetFeatureGateForTest(t, prometheustranslator.DropSanitizationGate, true)()
 
 		c := newCollector(&Config{}, zap.NewNop())
-		m, err := c.convertMetric(metric, pcommon.NewMap(), "scope", "v1", "", pcommon.NewMap())
+		metrics, err := c.convertMetric(metric, pcommon.NewMap(), "scope", "v1", "", pcommon.NewMap())
 		require.NoError(t, err)
+		require.Len(t, metrics, 1)
 
-		desc := m.Desc().String()
+		desc := metrics[0].Desc().String()
 		require.Contains(t, desc, `app__component`)
 	})
 
@@ -108,10 +109,11 @@ func TestCollectorMetricLabelSanitization(t *testing.T) {
 		defer testutil.SetFeatureGateForTest(t, prometheustranslator.DropSanitizationGate, false)()
 
 		c := newCollector(&Config{}, zap.NewNop())
-		m, err := c.convertMetric(metric, pcommon.NewMap(), "scope", "v1", "", pcommon.NewMap())
+		metrics, err := c.convertMetric(metric, pcommon.NewMap(), "scope", "v1", "", pcommon.NewMap())
 		require.NoError(t, err)
+		require.Len(t, metrics, 1)
 
-		desc := m.Desc().String()
+		desc := metrics[0].Desc().String()
 		require.Contains(t, desc, `app_component`)
 		require.NotContains(t, desc, `app__component`)
 	})
