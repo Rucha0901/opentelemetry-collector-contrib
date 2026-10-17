@@ -23,8 +23,8 @@ func TestExplicitHistogramDP_StartTimestamp(t *testing.T) {
 	after := time.Now().Add(time.Millisecond)
 
 	assert.False(t, dp.startTime.IsZero())
-	assert.True(t, !dp.startTime.Before(before))
-	assert.True(t, !dp.startTime.After(after))
+	assert.False(t, dp.startTime.Before(before))
+	assert.False(t, dp.startTime.After(after))
 
 	dp.Aggregate(3.0, 2)
 
@@ -50,7 +50,7 @@ func TestExplicitHistogramDP_ZeroStartTimeInitializedOnAggregate(t *testing.T) {
 	before := time.Now().Truncate(time.Millisecond)
 	dp.Aggregate(2.0, 1)
 	assert.False(t, dp.startTime.IsZero())
-	assert.True(t, !dp.startTime.Before(before))
+	assert.False(t, dp.startTime.Before(before))
 
 	dest := pmetric.NewHistogramDataPoint()
 	copyTime := time.Now().Add(time.Second)
@@ -69,8 +69,8 @@ func TestExponentialHistogramDP_StartTimestamp(t *testing.T) {
 	after := time.Now().Add(time.Millisecond)
 
 	assert.False(t, dp.startTime.IsZero())
-	assert.True(t, !dp.startTime.Before(before))
-	assert.True(t, !dp.startTime.After(after))
+	assert.False(t, dp.startTime.Before(before))
+	assert.False(t, dp.startTime.After(after))
 
 	dp.Aggregate(4.0, 1)
 
@@ -93,7 +93,7 @@ func TestExponentialHistogramDP_ZeroStartTimeInitializedOnAggregate(t *testing.T
 	before := time.Now().Truncate(time.Millisecond)
 	dp.Aggregate(3.0, 1)
 	assert.False(t, dp.startTime.IsZero())
-	assert.True(t, !dp.startTime.Before(before))
+	assert.False(t, dp.startTime.Before(before))
 
 	dest := pmetric.NewExponentialHistogramDataPoint()
 	copyTime := time.Now().Add(time.Second)
@@ -112,8 +112,8 @@ func TestGaugeDP_StartTimestamp(t *testing.T) {
 	after := time.Now().Add(time.Millisecond)
 
 	assert.False(t, dp.startTime.IsZero())
-	assert.True(t, !dp.startTime.Before(before))
-	assert.True(t, !dp.startTime.After(after))
+	assert.False(t, dp.startTime.Before(before))
+	assert.False(t, dp.startTime.After(after))
 
 	dp.Aggregate(int64(42))
 
@@ -144,7 +144,7 @@ func TestGaugeDP_ZeroStartTimeInitializedOnAggregate(t *testing.T) {
 	before := time.Now().Truncate(time.Millisecond)
 	dp.Aggregate(int64(10))
 	assert.False(t, dp.startTime.IsZero())
-	assert.True(t, !dp.startTime.Before(before))
+	assert.False(t, dp.startTime.Before(before))
 
 	dest := pmetric.NewNumberDataPoint()
 	copyTime := time.Now().Add(time.Second)
@@ -164,8 +164,8 @@ func TestSumDP_StartTimestamp(t *testing.T) {
 	after := time.Now().Add(time.Millisecond)
 
 	assert.False(t, dpInt.startTime.IsZero())
-	assert.True(t, !dpInt.startTime.Before(before))
-	assert.True(t, !dpInt.startTime.After(after))
+	assert.False(t, dpInt.startTime.Before(before))
+	assert.False(t, dpInt.startTime.After(after))
 
 	dpInt.AggregateInt(10)
 	dpInt.AggregateInt(5)
@@ -202,7 +202,7 @@ func TestSumDP_ZeroStartTimeInitializedOnAggregate(t *testing.T) {
 	before := time.Now().Truncate(time.Millisecond)
 	dpInt.AggregateInt(7)
 	assert.False(t, dpInt.startTime.IsZero())
-	assert.True(t, !dpInt.startTime.Before(before))
+	assert.False(t, dpInt.startTime.Before(before))
 
 	destInt := pmetric.NewNumberDataPoint()
 	copyTime := time.Now().Add(time.Second)
@@ -220,7 +220,7 @@ func TestSumDP_ZeroStartTimeInitializedOnAggregate(t *testing.T) {
 	beforeDbl := time.Now().Truncate(time.Millisecond)
 	dpDbl.AggregateDouble(7.5)
 	assert.False(t, dpDbl.startTime.IsZero())
-	assert.True(t, !dpDbl.startTime.Before(beforeDbl))
+	assert.False(t, dpDbl.startTime.Before(beforeDbl))
 
 	destDbl := pmetric.NewNumberDataPoint()
 	dpDbl.Copy(copyTime, destDbl)
