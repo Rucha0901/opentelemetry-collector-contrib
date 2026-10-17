@@ -1,0 +1,6 @@
+change_type: bug_fix
+component: receiver/ssh_check
+note: Fix race condition and state mutation in scraper.
+issues: [52135]
+subtext:
+change_logs: [user]

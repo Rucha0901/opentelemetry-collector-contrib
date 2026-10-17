@@ -30,6 +30,7 @@ type sshServer struct {
 	done     chan struct{}
 }
 
+//nolint:unparam
 func newSSHServer(network, endpoint string) (*sshServer, error) {
 	listener, err := net.Listen(network, endpoint)
 	if err != nil {
@@ -332,8 +333,73 @@ func TestWithoutStartErrsNotPanics(t *testing.T) {
 	// create the scraper without starting it, so Client is nil
 	scrpr := newScraper(cfg, receivertest.NewNopSettings(metadata.Type))
 
-	// scrape should error not panic
+	// scrape should error not panic, even if context has a deadline
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
 	var err error
-	require.NotPanics(t, func() { _, err = scrpr.scrape(t.Context()) }, "scrape should not panic")
+	require.NotPanics(t, func() { _, err = scrpr.scrape(ctx) }, "scrape should not panic")
 	require.Error(t, err, "expected scrape to err when without start")
+}
+
+func TestScraperTimeoutPreservedAcrossScrapes(t *testing.T) {
+	s, err := newSSHServer("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	endpoint := s.runSSHServer(t)
+	require.NotEmpty(t, endpoint)
+	defer s.shutdown()
+
+	f := NewFactory()
+	cfg := f.CreateDefaultConfig().(*Config)
+	configuredTimeout := 7 * time.Second
+	cfg.SSHClientSettings.Timeout = configuredTimeout
+	cfg.SSHClientSettings.Username = "otelu"
+	cfg.SSHClientSettings.Password = "otelp"
+	cfg.SSHClientSettings.Endpoint = endpoint
+	cfg.SSHClientSettings.IgnoreHostKey = true
+
+	settings := receivertest.NewNopSettings(metadata.Type)
+	scrpr := newScraper(cfg, settings)
+	require.NoError(t, scrpr.start(t.Context(), componenttest.NewNopHost()))
+
+	// Scrape with a shorter context deadline
+	shortDeadlineCtx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+
+	_, err = scrpr.scrape(shortDeadlineCtx)
+	require.NoError(t, err)
+	require.Equal(t, configuredTimeout, scrpr.SSHClientSettings.Timeout, "SSHClientSettings.Timeout should not be mutated")
+	require.Equal(t, configuredTimeout, scrpr.Timeout, "Timeout should not be mutated")
+
+	// Next scrape without short deadline should still have the original timeout
+	_, err = scrpr.scrape(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, configuredTimeout, scrpr.SSHClientSettings.Timeout, "SSHClientSettings.Timeout should still match configured timeout")
+	require.Equal(t, configuredTimeout, scrpr.Timeout, "Timeout should still match configured timeout")
+}
+
+func TestScraperCleanupNoRace(t *testing.T) {
+	s, err := newSSHServer("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	endpoint := s.runSSHServer(t)
+	require.NotEmpty(t, endpoint)
+	defer s.shutdown()
+
+	f := NewFactory()
+	cfg := f.CreateDefaultConfig().(*Config)
+	cfg.SSHClientSettings.Username = "otelu"
+	cfg.SSHClientSettings.Password = "otelp"
+	cfg.SSHClientSettings.Endpoint = endpoint
+	cfg.SSHClientSettings.IgnoreHostKey = true
+
+	settings := receivertest.NewNopSettings(metadata.Type)
+	scrpr := newScraper(cfg, settings)
+	require.NoError(t, scrpr.start(t.Context(), componenttest.NewNopHost()))
+
+	for range 20 {
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		_, err = scrpr.scrape(ctx)
+		cancel()
+		require.NoError(t, err)
+	}
 }

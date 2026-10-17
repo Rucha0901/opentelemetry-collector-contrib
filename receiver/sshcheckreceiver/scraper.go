@@ -33,12 +33,15 @@ func (s *sshcheckScraper) start(_ context.Context, host component.Host) error {
 	return err
 }
 
-func (s *sshcheckScraper) scrapeSSH(now pcommon.Timestamp) error {
+func (s *sshcheckScraper) scrapeSSH(now pcommon.Timestamp, to time.Duration) error {
 	var success int64
 
 	start := time.Now()
-	err := s.Dial(s.SSHClientSettings.Endpoint)
+	cfg := *s.ClientConfig
+	cfg.Timeout = to
+	client, err := s.DialFunc("tcp", s.SSHClientSettings.Endpoint, &cfg)
 	if err == nil {
+		s.Client.Client = client
 		success = 1
 	}
 	s.mb.RecordSshcheckDurationDataPoint(now, time.Since(start).Milliseconds())
@@ -76,7 +79,6 @@ func timeout(deadline time.Time, timeout time.Duration) time.Duration {
 // is a bit awkward here, because the SFTP checks are not enabled by default and they would panic on nil
 // ref to the underlying Conn when SSH checks failed.
 func (s *sshcheckScraper) scrape(ctx context.Context) (_ pmetric.Metrics, err error) {
-	var to time.Duration
 	// check cancellation
 	select {
 	case <-ctx.Done():
@@ -84,32 +86,31 @@ func (s *sshcheckScraper) scrape(ctx context.Context) (_ pmetric.Metrics, err er
 	default:
 	}
 
-	cleanup := func() {
-		s.Close()
-	}
-
-	// if the context carries a shorter deadline then timeout that quickly
-	deadline, ok := ctx.Deadline()
-	if ok {
-		to = timeout(deadline, s.Timeout)
-		s.Timeout = to
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	now := pcommon.NewTimestampFromTime(time.Now())
 	if s.Client == nil {
 		return pmetric.NewMetrics(), errClientNotInit
 	}
 
-	if err = s.scrapeSSH(now); err != nil {
+	defer func() {
+		if s.Client != nil && s.Client.Client != nil {
+			_ = s.Close()
+			s.Client.Client = nil
+		}
+	}()
+
+	// if the context carries a shorter deadline then timeout that quickly
+	to := s.SSHClientSettings.Timeout
+	if to == 0 && s.Client != nil {
+		to = s.Timeout
+	}
+	deadline, ok := ctx.Deadline()
+	if ok {
+		to = timeout(deadline, to)
+	}
+
+	now := pcommon.NewTimestampFromTime(time.Now())
+
+	if err = s.scrapeSSH(now, to); err != nil {
 		s.mb.RecordSshcheckErrorDataPoint(now, int64(1), err.Error())
-	} else {
-		go func() {
-			<-ctx.Done()
-			cleanup()
-		}()
 	}
 
 	if s.SFTPEnabled() {
