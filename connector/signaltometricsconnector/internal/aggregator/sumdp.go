@@ -12,7 +12,8 @@ import (
 
 // sumDP counts the number of events (supports all event types)
 type sumDP struct {
-	attrs pcommon.Map
+	attrs     pcommon.Map
+	startTime time.Time
 
 	isDbl  bool
 	intVal int64
@@ -21,8 +22,9 @@ type sumDP struct {
 
 func newSumDP(attrs pcommon.Map, isDbl bool) *sumDP {
 	return &sumDP{
-		isDbl: isDbl,
-		attrs: attrs,
+		isDbl:     isDbl,
+		attrs:     attrs,
+		startTime: time.Now(),
 	}
 }
 
@@ -30,12 +32,18 @@ func (dp *sumDP) AggregateInt(v int64) {
 	if dp.isDbl {
 		panic("unexpected usage of sum datapoint, only integer value expected")
 	}
+	if dp.startTime.IsZero() {
+		dp.startTime = time.Now()
+	}
 	dp.intVal += v
 }
 
 func (dp *sumDP) AggregateDouble(v float64) {
 	if !dp.isDbl {
 		panic("unexpected usage of sum datapoint, only double value expected")
+	}
+	if dp.startTime.IsZero() {
+		dp.startTime = time.Now()
 	}
 	dp.dblVal += v
 }
@@ -50,6 +58,6 @@ func (dp *sumDP) Copy(
 	} else {
 		dest.SetIntValue(dp.intVal)
 	}
-	// TODO determine appropriate start time
+	dest.SetStartTimestamp(pcommon.NewTimestampFromTime(dp.startTime))
 	dest.SetTimestamp(pcommon.NewTimestampFromTime(timestamp))
 }

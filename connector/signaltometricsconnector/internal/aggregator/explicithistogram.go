@@ -14,6 +14,8 @@ import (
 type explicitHistogramDP struct {
 	attrs pcommon.Map
 
+	startTime time.Time
+
 	sum   float64
 	count uint64
 
@@ -35,13 +37,17 @@ type explicitHistogramDP struct {
 
 func newExplicitHistogramDP(attrs pcommon.Map, bounds []float64) *explicitHistogramDP {
 	return &explicitHistogramDP{
-		attrs:  attrs,
-		bounds: bounds,
-		counts: make([]uint64, len(bounds)+1),
+		attrs:     attrs,
+		bounds:    bounds,
+		counts:    make([]uint64, len(bounds)+1),
+		startTime: time.Now(),
 	}
 }
 
 func (dp *explicitHistogramDP) Aggregate(value float64, count int64) {
+	if dp.startTime.IsZero() {
+		dp.startTime = time.Now()
+	}
 	dp.sum += value * float64(count)
 	dp.count += uint64(count)
 	dp.counts[sort.SearchFloat64s(dp.bounds, value)] += uint64(count)
@@ -56,6 +62,6 @@ func (dp *explicitHistogramDP) Copy(
 	dest.BucketCounts().FromRaw(dp.counts)
 	dest.SetCount(dp.count)
 	dest.SetSum(dp.sum)
-	// TODO determine appropriate start time
+	dest.SetStartTimestamp(pcommon.NewTimestampFromTime(dp.startTime))
 	dest.SetTimestamp(pcommon.NewTimestampFromTime(timestamp))
 }

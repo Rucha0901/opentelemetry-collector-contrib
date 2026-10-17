@@ -12,17 +12,22 @@ import (
 
 // gaugeDP is a data point for gauge metrics.
 type gaugeDP struct {
-	attrs pcommon.Map
-	val   any
+	attrs     pcommon.Map
+	startTime time.Time
+	val       any
 }
 
 func newGaugeDP(attrs pcommon.Map) *gaugeDP {
 	return &gaugeDP{
-		attrs: attrs,
+		attrs:     attrs,
+		startTime: time.Now(),
 	}
 }
 
 func (dp *gaugeDP) Aggregate(v any) {
+	if dp.startTime.IsZero() {
+		dp.startTime = time.Now()
+	}
 	switch v := v.(type) {
 	case float64, int64:
 		dp.val = v
@@ -43,6 +48,6 @@ func (dp *gaugeDP) Copy(
 	case int64:
 		dest.SetIntValue(v)
 	}
-	// TODO determine appropriate start time
+	dest.SetStartTimestamp(pcommon.NewTimestampFromTime(dp.startTime))
 	dest.SetTimestamp(pcommon.NewTimestampFromTime(timestamp))
 }

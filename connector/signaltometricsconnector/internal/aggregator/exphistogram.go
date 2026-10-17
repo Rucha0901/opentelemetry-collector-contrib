@@ -12,13 +12,15 @@ import (
 )
 
 type exponentialHistogramDP struct {
-	attrs pcommon.Map
-	data  *structure.Histogram[float64]
+	attrs     pcommon.Map
+	startTime time.Time
+	data      *structure.Histogram[float64]
 }
 
 func newExponentialHistogramDP(attrs pcommon.Map, maxSize int32) *exponentialHistogramDP {
 	return &exponentialHistogramDP{
-		attrs: attrs,
+		attrs:     attrs,
+		startTime: time.Now(),
 		data: structure.NewFloat64(
 			structure.NewConfig(structure.WithMaxSize(maxSize)),
 		),
@@ -26,6 +28,9 @@ func newExponentialHistogramDP(attrs pcommon.Map, maxSize int32) *exponentialHis
 }
 
 func (dp *exponentialHistogramDP) Aggregate(value float64, count int64) {
+	if dp.startTime.IsZero() {
+		dp.startTime = time.Now()
+	}
 	dp.data.UpdateByIncr(value, uint64(count))
 }
 
@@ -42,7 +47,7 @@ func (dp *exponentialHistogramDP) Copy(
 		dest.SetMin(dp.data.Min())
 		dest.SetMax(dp.data.Max())
 	}
-	// TODO determine appropriate start time
+	dest.SetStartTimestamp(pcommon.NewTimestampFromTime(dp.startTime))
 	dest.SetTimestamp(pcommon.NewTimestampFromTime(timestamp))
 
 	copyBucketRange(dp.data.Positive(), dest.Positive())
