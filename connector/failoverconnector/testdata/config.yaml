@@ -49,3 +49,13 @@ failover/emptyerrorcontains:
   retry_interval: 5m
   condition:
     error: {}
+
+failover/whitespaceerrorcontains:
+  priority_levels:
+    - [ traces/first ]
+    - [ traces/second ]
+  retry_interval: 5m
+  condition:
+    error:
+      contains: ["   "]
+

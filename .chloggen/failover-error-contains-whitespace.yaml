@@ -1,0 +1,6 @@
+change_type: bug_fix
+component: connector/failover
+note: Reject whitespace-only strings in `condition.error.contains` configuration
+issues: [44518]
+subtext:
+change_logs: [user]

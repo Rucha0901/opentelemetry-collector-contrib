@@ -125,6 +125,11 @@ func TestValidateConfig(t *testing.T) {
 			id:   component.NewIDWithName(metadata.Type, "emptyerrorcontains"),
 			err:  errEmptyErrorContains,
 		},
+		{
+			name: "whitespace error contains string",
+			id:   component.NewIDWithName(metadata.Type, "whitespaceerrorcontains"),
+			err:  errEmptyErrorContains,
+		},
 	}
 
 	for _, tc := range testcases {

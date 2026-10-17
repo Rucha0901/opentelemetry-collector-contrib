@@ -30,6 +30,9 @@ func TestErrorConditionValidate(t *testing.T) {
 	assert.ErrorIs(t, (&ErrorCondition{}).Validate(), errEmptyErrorContains)
 	assert.ErrorIs(t, (&ErrorCondition{Contains: []string{""}}).Validate(), errEmptyErrorContains)
 	assert.ErrorIs(t, (&ErrorCondition{Contains: []string{"network failure", ""}}).Validate(), errEmptyErrorContains)
+	assert.ErrorIs(t, (&ErrorCondition{Contains: []string{"   "}}).Validate(), errEmptyErrorContains)
+	assert.ErrorIs(t, (&ErrorCondition{Contains: []string{"\t"}}).Validate(), errEmptyErrorContains)
+	assert.ErrorIs(t, (&ErrorCondition{Contains: []string{"network failure", "  "}}).Validate(), errEmptyErrorContains)
 }
 
 func TestConditionsConfigValidate(t *testing.T) {
